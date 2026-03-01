@@ -1,0 +1,10 @@
+{
+  "name": "@color-grader/pi-package",
+  "version": "0.1.0",
+  "description": "Color correction tools for Pi - S-Log to Rec.709",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./.pi/extensions"],
+    "skills": ["./.pi/skills"]
+  }
+}
