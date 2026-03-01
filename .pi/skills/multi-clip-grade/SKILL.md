@@ -1,3 +1,7 @@
+---
+description: Grade multiple clips with consistent color matching across shots using hero-clip propagation workflow
+---
+
 # Multi-Clip Color Grading
 
 ## When to Use

@@ -1,3 +1,7 @@
+---
+description: Color correct S-Log (SLog2/SLog3) footage to Rec.709 using LUT conversion and iterative grading
+---
+
 # S-Log to Rec.709 Color Correction
 
 ## When to Use

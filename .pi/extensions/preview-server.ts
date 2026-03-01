@@ -1,4 +1,5 @@
-import { tool, ToolResult } from "pi-ext";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 import { existsSync, createReadStream, readdirSync, statSync, watch } from "fs";
 import { readFile } from "fs/promises";
 import { resolve, extname, join } from "path";
@@ -141,7 +142,6 @@ function loadImages() {
       if (f.name.startsWith('compare-')) refreshImage('compare', '/images/' + f.name);
     });
 
-    // Scopes
     const scopeFiles = files.filter(f => f.name.startsWith('scope-'));
     const scopesRow = document.getElementById('scopes-row');
     scopesRow.innerHTML = '';
@@ -155,7 +155,6 @@ function loadImages() {
   }).catch(() => {});
 }
 
-// SSE
 const evtSource = new EventSource('/events');
 evtSource.onmessage = function(e) {
   if (e.data === 'connected') { addLog('Connected to preview server'); return; }
@@ -178,7 +177,6 @@ evtSource.onopen = function() {
   document.querySelector('.dot').style.background = '#4caf50';
 };
 
-// Initial load
 loadTimeline();
 loadImages();
 </script>
@@ -190,7 +188,6 @@ loadImages();
 function handleRequest(tmpDir: string, req: IncomingMessage, res: ServerResponse) {
 	const url = req.url || "/";
 
-	// SSE endpoint
 	if (url === "/events") {
 		res.writeHead(200, {
 			"Content-Type": "text/event-stream",
@@ -206,7 +203,6 @@ function handleRequest(tmpDir: string, req: IncomingMessage, res: ServerResponse
 		return;
 	}
 
-	// API: timeline
 	if (url === "/api/timeline") {
 		const timelinePath = resolve(tmpDir, "timeline.json");
 		if (existsSync(timelinePath)) {
@@ -224,7 +220,6 @@ function handleRequest(tmpDir: string, req: IncomingMessage, res: ServerResponse
 		return;
 	}
 
-	// API: list images
 	if (url === "/api/images") {
 		try {
 			const files = readdirSync(tmpDir)
@@ -243,12 +238,10 @@ function handleRequest(tmpDir: string, req: IncomingMessage, res: ServerResponse
 		return;
 	}
 
-	// Serve images
 	if (url.startsWith("/images/")) {
 		const filename = decodeURIComponent(url.replace("/images/", "").split("?")[0]);
 		const filePath = resolve(tmpDir, filename);
 
-		// Security: prevent path traversal
 		if (!filePath.startsWith(tmpDir) || !existsSync(filePath)) {
 			res.writeHead(404);
 			res.end("Not found");
@@ -267,7 +260,6 @@ function handleRequest(tmpDir: string, req: IncomingMessage, res: ServerResponse
 		return;
 	}
 
-	// Default: serve HTML page
 	res.writeHead(200, { "Content-Type": "text/html" });
 	res.end(HTML_PAGE);
 }
@@ -287,118 +279,108 @@ function broadcastUpdate(file: string) {
 
 // ─── Tool ─────────────────────────────────────────────────────────────────
 
-export default tool({
-	name: "preview_server",
-	description:
-		"Start or stop a local web preview server that shows color grading progress in real time. " +
-		"Open localhost:<port> in your browser to see clip thumbnails, before/after comparisons, " +
-		"and grading status. The page auto-refreshes when new preview images are generated.",
-	parameters: {
-		action: {
-			type: "string",
-			description: '"start" to launch the server, "stop" to shut it down, "status" to check if running.',
-		},
-		timeline_dir: {
-			type: "string",
-			description: "Working directory for the timeline (where .color-grader-tmp lives).",
-		},
-		port: {
-			type: "number",
-			description: "Port number. Default: 3847.",
-			default: 3847,
-		},
-	},
-	execute: async (params): Promise<ToolResult> => {
-		const action = params.action;
+const Parameters = Type.Object({
+	action: Type.String({ description: '"start" to launch the server, "stop" to shut it down, "status" to check if running.' }),
+	timeline_dir: Type.String({ description: "Working directory for the timeline (where .color-grader-tmp lives)." }),
+	port: Type.Optional(Type.Number({ description: "Port number. Default: 3847." })),
+});
 
-		if (action === "status") {
-			if (activeServer) {
-				return { output: `Preview server is running at http://localhost:${activePort}` };
-			}
-			return { output: "Preview server is not running." };
-		}
+export default (pi: ExtensionAPI) => {
+	pi.registerTool({
+		name: "preview_server",
+		label: "Preview Server",
+		description:
+			"Start or stop a local web preview server that shows color grading progress in real time. " +
+			"Open localhost:<port> in your browser to see clip thumbnails, before/after comparisons, " +
+			"and grading status. The page auto-refreshes when new preview images are generated.",
+		parameters: Parameters,
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			const action = params.action;
 
-		if (action === "stop") {
-			if (!activeServer) {
-				return { output: "Preview server is not running." };
-			}
-			// Close all SSE clients
-			for (const client of sseClients) {
-				try { client.end(); } catch {}
-			}
-			sseClients = [];
-			// Close watcher
-			if (activeWatcher) {
-				activeWatcher.close();
-				activeWatcher = null;
-			}
-			// Close server
-			activeServer.close();
-			activeServer = null;
-			activeTmpDir = "";
-			const port = activePort;
-			activePort = 0;
-			return { output: `Preview server stopped (was on port ${port}).` };
-		}
-
-		if (action === "start") {
-			if (activeServer) {
-				return { output: `Preview server is already running at http://localhost:${activePort}` };
+			if (action === "status") {
+				if (activeServer) {
+					return { content: [{ type: "text", text: `Preview server is running at http://localhost:${activePort}` }], details: undefined };
+				}
+				return { content: [{ type: "text", text: "Preview server is not running." }], details: undefined };
 			}
 
-			const dir = resolve(params.timeline_dir);
-			const tmpDir = resolve(dir, ".color-grader-tmp");
-			const port = params.port ?? 3847;
+			if (action === "stop") {
+				if (!activeServer) {
+					return { content: [{ type: "text", text: "Preview server is not running." }], details: undefined };
+				}
+				for (const client of sseClients) {
+					try { client.end(); } catch {}
+				}
+				sseClients = [];
+				if (activeWatcher) {
+					activeWatcher.close();
+					activeWatcher = null;
+				}
+				activeServer.close();
+				activeServer = null;
+				activeTmpDir = "";
+				const port = activePort;
+				activePort = 0;
+				return { content: [{ type: "text", text: `Preview server stopped (was on port ${port}).` }], details: undefined };
+			}
 
-			// Create server
-			const server = createServer((req, res) => handleRequest(tmpDir, req, res));
+			if (action === "start") {
+				if (activeServer) {
+					return { content: [{ type: "text", text: `Preview server is already running at http://localhost:${activePort}` }], details: undefined };
+				}
 
-			// Start file watcher
-			let watcher: FSWatcher | null = null;
-			if (existsSync(tmpDir)) {
-				try {
-					watcher = watch(tmpDir, { recursive: false }, (eventType, filename) => {
-						if (filename) {
-							broadcastUpdate(filename);
+				const dir = resolve(params.timeline_dir);
+				const tmpDir = resolve(dir, ".color-grader-tmp");
+				const port = params.port ?? 3847;
+
+				const server = createServer((req, res) => handleRequest(tmpDir, req, res));
+
+				let watcher: FSWatcher | null = null;
+				if (existsSync(tmpDir)) {
+					try {
+						watcher = watch(tmpDir, { recursive: false }, (eventType, filename) => {
+							if (filename) {
+								broadcastUpdate(filename);
+							}
+						});
+					} catch {
+						// Watcher failed, server still works
+					}
+				}
+
+				return new Promise((resolvePromise) => {
+					server.on("error", (err: any) => {
+						if (err.code === "EADDRINUSE") {
+							resolvePromise({ content: [{ type: "text", text: `Error: Port ${port} is already in use. Try a different port.` }], details: undefined });
+						} else {
+							resolvePromise({ content: [{ type: "text", text: `Error: Server error: ${err.message}` }], details: undefined });
 						}
 					});
-				} catch {
-					// Watcher failed, server still works (client polls via initial load)
-				}
-			}
 
-			// Start listening
-			return new Promise((resolvePromise) => {
-				server.on("error", (err: any) => {
-					if (err.code === "EADDRINUSE") {
-						resolvePromise({ error: `Port ${port} is already in use. Try a different port.` });
-					} else {
-						resolvePromise({ error: `Server error: ${err.message}` });
-					}
-				});
+					server.listen(port, "127.0.0.1", () => {
+						activeServer = server;
+						activeWatcher = watcher;
+						activeTmpDir = tmpDir;
+						activePort = port;
 
-				server.listen(port, "127.0.0.1", () => {
-					activeServer = server;
-					activeWatcher = watcher;
-					activeTmpDir = tmpDir;
-					activePort = port;
-
-					resolvePromise({
-						output: [
-							"═══ PREVIEW SERVER STARTED ═══",
-							`URL: http://localhost:${port}`,
-							`Watching: ${tmpDir}`,
-							"",
-							"Open this URL in your browser to watch grading progress.",
-							"The page auto-refreshes when preview images are updated.",
-							"",
-							'Use preview_server(action: "stop") to shut down.',
-						].join("\n"),
+						resolvePromise({
+							content: [{ type: "text", text: [
+								"═══ PREVIEW SERVER STARTED ═══",
+								`URL: http://localhost:${port}`,
+								`Watching: ${tmpDir}`,
+								"",
+								"Open this URL in your browser to watch grading progress.",
+								"The page auto-refreshes when preview images are updated.",
+								"",
+								'Use preview_server(action: "stop") to shut down.',
+							].join("\n") }],
+							details: undefined,
+						});
 					});
 				});
-			});
-		}
+			}
 
-		return { error: `Unknown action: "${action}". Use "start", "stop", or "status".` };
-	},
-});
+			return { content: [{ type: "text", text: `Error: Unknown action: "${action}". Use "start", "stop", or "status".` }], details: undefined };
+		},
+	});
+};

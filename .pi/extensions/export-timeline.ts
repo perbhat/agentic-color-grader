@@ -1,4 +1,5 @@
-import { tool, ToolResult } from "pi-ext";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 import { existsSync } from "fs";
 import { writeFile, mkdir } from "fs/promises";
 import { resolve, dirname, basename } from "path";
@@ -20,7 +21,9 @@ async function encodeClip(
 ): Promise<void> {
 	const args = [
 		"-y",
+		...(clip.in_point && clip.in_point !== "00:00:00" ? ["-ss", clip.in_point] : []),
 		"-i", clip.video,
+		...(clip.out_point && clip.out_point !== "end" ? ["-to", clip.out_point] : []),
 		...(filterChain ? ["-vf", filterChain] : []),
 		"-c:v", codec,
 		"-crf", String(crf),
@@ -43,7 +46,6 @@ async function concatenateFiles(
 	filePaths: string[],
 	outputPath: string,
 ): Promise<void> {
-	// Build concat demuxer file
 	const concatDir = dirname(outputPath);
 	const concatFile = resolve(concatDir, ".concat-list.txt");
 	const concatContent = filePaths.map((f) => `file '${f}'`).join("\n");
@@ -69,153 +71,130 @@ async function concatenateFiles(
 
 // ─── Tool ─────────────────────────────────────────────────────────────────
 
-export default tool({
-	name: "export_timeline",
-	description:
-		"Export all clips in a timeline as a single concatenated video. " +
-		"Each clip is encoded with its combined corrections (group base + per-clip), then concatenated in timeline order. " +
-		"Audio is re-encoded to ensure consistent format across clips.",
-	parameters: {
-		timeline_dir: {
-			type: "string",
-			description: "Working directory for the timeline.",
-		},
-		output: {
-			type: "string",
-			description: "Output video file path.",
-		},
-		codec: {
-			type: "string",
-			description: 'Video codec. Default: "libx264". Options: libx264, libx265, libsvtav1.',
-			default: "libx264",
-		},
-		quality: {
-			type: "number",
-			description: "CRF value (lower = higher quality). Default: 18.",
-			default: 18,
-		},
-		clip_ids: {
-			type: "array",
-			description: "Optional: export only specific clip IDs. Default: all clips in timeline order.",
-			default: [],
-		},
-	},
-	execute: async (params): Promise<ToolResult> => {
-		const dir = resolve(params.timeline_dir);
-		const timeline = await loadTimeline(dir);
+const Parameters = Type.Object({
+	timeline_dir: Type.String({ description: "Working directory for the timeline." }),
+	output: Type.String({ description: "Output video file path." }),
+	codec: Type.Optional(Type.String({ description: 'Video codec. Default: "libx264". Options: libx264, libx265, libsvtav1.' })),
+	quality: Type.Optional(Type.Number({ description: "CRF value (lower = higher quality). Default: 18." })),
+	clip_ids: Type.Optional(Type.Array(Type.String(), { description: "Optional: export only specific clip IDs. Default: all clips in timeline order." })),
+});
 
-		if (timeline.clips.length === 0) {
-			return { error: "Timeline has no clips." };
-		}
+export default (pi: ExtensionAPI) => {
+	pi.registerTool({
+		name: "export_timeline",
+		label: "Export Timeline",
+		description:
+			"Export all clips in a timeline as a single concatenated video. " +
+			"Each clip is encoded with its combined corrections (group base + per-clip), then concatenated in timeline order. " +
+			"Audio is re-encoded to ensure consistent format across clips.",
+		parameters: Parameters,
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			const dir = resolve(params.timeline_dir);
+			const timeline = await loadTimeline(dir);
 
-		if (!params.output) {
-			return { error: "output path is required." };
-		}
-
-		const outputPath = resolve(params.output);
-		const codec = params.codec ?? "libx264";
-		const crf = params.quality ?? 18;
-		const requestedIds: string[] = params.clip_ids ?? [];
-
-		// Select clips to export
-		let clipsToExport = timeline.clips;
-		if (requestedIds.length > 0) {
-			clipsToExport = [];
-			for (const id of requestedIds) {
-				const clip = timeline.clips.find((c) => c.id === id);
-				if (!clip) return { error: `Clip not found: ${id}` };
-				clipsToExport.push(clip);
+			if (timeline.clips.length === 0) {
+				return { content: [{ type: "text", text: "Error: Timeline has no clips." }], details: undefined };
 			}
-		}
 
-		// Build group base corrections map
-		const groupBase: Record<string, any> = {};
-		for (const [name, settings] of Object.entries(timeline.groups)) {
-			groupBase[name] = settings.base_corrections;
-		}
-
-		// Validate all clips have corrections
-		const ungraded = clipsToExport.filter(
-			(c) => !buildCombinedFilterChain(c, groupBase),
-		);
-		if (ungraded.length > 0) {
-			return {
-				error: `${ungraded.length} clip(s) have no corrections: ${ungraded.map((c) => c.id).join(", ")}. Grade all clips before exporting.`,
-			};
-		}
-
-		const tmpDir = resolve(dir, ".color-grader-tmp", "export-tmp");
-		if (!existsSync(tmpDir)) {
-			await mkdir(tmpDir, { recursive: true });
-		}
-
-		// Check if all clips can use the same filter chain (concat-demux shortcut)
-		const filterChains = clipsToExport.map((c) => buildCombinedFilterChain(c, groupBase));
-		const allSameFilter = filterChains.every((f) => f === filterChains[0]);
-
-		const report: string[] = [
-			"═══ TIMELINE EXPORT ═══",
-			`Clips: ${clipsToExport.length}`,
-			`Codec: ${codec}`,
-			`Quality: CRF ${crf}`,
-			`Output: ${outputPath}`,
-			"",
-		];
-
-		if (clipsToExport.length === 1) {
-			// Single clip — direct encode
-			const clip = clipsToExport[0];
-			const filter = buildCombinedFilterChain(clip, groupBase);
-			report.push(`Encoding ${clip.id}...`);
-			try {
-				await encodeClip(clip, filter, outputPath, codec, crf);
-			} catch (err: any) {
-				return { error: err.message };
+			if (!params.output) {
+				return { content: [{ type: "text", text: "Error: output path is required." }], details: undefined };
 			}
-			report.push("Export complete.");
-		} else {
-			// Multiple clips — encode each then concatenate
-			const tempFiles: string[] = [];
 
-			for (let i = 0; i < clipsToExport.length; i++) {
-				const clip = clipsToExport[i];
-				const filter = buildCombinedFilterChain(clip, groupBase);
-				const tempFile = resolve(tmpDir, `${clip.id}_encoded.mp4`);
-				tempFiles.push(tempFile);
+			const outputPath = resolve(params.output);
+			const codec = params.codec ?? "libx264";
+			const crf = params.quality ?? 18;
+			const requestedIds: string[] = params.clip_ids ?? [];
 
-				report.push(`Encoding ${clip.id} (${i + 1}/${clipsToExport.length})...`);
-				try {
-					await encodeClip(clip, filter, tempFile, codec, crf);
-				} catch (err: any) {
-					return { error: `Failed encoding ${clip.id}: ${err.message}` };
+			let clipsToExport = timeline.clips;
+			if (requestedIds.length > 0) {
+				clipsToExport = [];
+				for (const id of requestedIds) {
+					const clip = timeline.clips.find((c) => c.id === id);
+					if (!clip) return { content: [{ type: "text", text: `Error: Clip not found: ${id}` }], details: undefined };
+					clipsToExport.push(clip);
 				}
 			}
 
-			// Concatenate all encoded clips
-			report.push("");
-			report.push("Concatenating clips...");
-			try {
-				await concatenateFiles(tempFiles, outputPath);
-			} catch (err: any) {
-				return { error: err.message };
+			const groupBase: Record<string, any> = {};
+			for (const [name, settings] of Object.entries(timeline.groups)) {
+				groupBase[name] = settings.base_corrections;
 			}
 
-			report.push("Concatenation complete.");
-		}
+			const ungraded = clipsToExport.filter(
+				(c) => !buildCombinedFilterChain(c, groupBase),
+			);
+			if (ungraded.length > 0) {
+				return { content: [{ type: "text", text: `Error: ${ungraded.length} clip(s) have no corrections: ${ungraded.map((c) => c.id).join(", ")}. Grade all clips before exporting.` }], details: undefined };
+			}
 
-		report.push("");
-		report.push("── Clip Details ──");
-		for (let i = 0; i < clipsToExport.length; i++) {
-			const clip = clipsToExport[i];
-			const filter = filterChains[i];
-			report.push(`  ${clip.id}: ${basename(clip.video)}`);
-			report.push(`    Filter: ${filter}`);
-		}
+			const tmpDir = resolve(dir, ".color-grader-tmp", "export-tmp");
+			if (!existsSync(tmpDir)) {
+				await mkdir(tmpDir, { recursive: true });
+			}
 
-		report.push("");
-		report.push(`Output: ${outputPath}`);
-		report.push("Export finished successfully.");
+			const filterChains = clipsToExport.map((c) => buildCombinedFilterChain(c, groupBase));
 
-		return { output: report.join("\n") };
-	},
-});
+			const report: string[] = [
+				"═══ TIMELINE EXPORT ═══",
+				`Clips: ${clipsToExport.length}`,
+				`Codec: ${codec}`,
+				`Quality: CRF ${crf}`,
+				`Output: ${outputPath}`,
+				"",
+			];
+
+			if (clipsToExport.length === 1) {
+				const clip = clipsToExport[0];
+				const filter = buildCombinedFilterChain(clip, groupBase);
+				report.push(`Encoding ${clip.id}...`);
+				try {
+					await encodeClip(clip, filter, outputPath, codec, crf);
+				} catch (err: any) {
+					return { content: [{ type: "text", text: `Error: ${err.message}` }], details: undefined };
+				}
+				report.push("Export complete.");
+			} else {
+				const tempFiles: string[] = [];
+
+				for (let i = 0; i < clipsToExport.length; i++) {
+					const clip = clipsToExport[i];
+					const filter = buildCombinedFilterChain(clip, groupBase);
+					const tempFile = resolve(tmpDir, `${clip.id}_encoded.mp4`);
+					tempFiles.push(tempFile);
+
+					report.push(`Encoding ${clip.id} (${i + 1}/${clipsToExport.length})...`);
+					try {
+						await encodeClip(clip, filter, tempFile, codec, crf);
+					} catch (err: any) {
+						return { content: [{ type: "text", text: `Error: Failed encoding ${clip.id}: ${err.message}` }], details: undefined };
+					}
+				}
+
+				report.push("");
+				report.push("Concatenating clips...");
+				try {
+					await concatenateFiles(tempFiles, outputPath);
+				} catch (err: any) {
+					return { content: [{ type: "text", text: `Error: ${err.message}` }], details: undefined };
+				}
+
+				report.push("Concatenation complete.");
+			}
+
+			report.push("");
+			report.push("── Clip Details ──");
+			for (let i = 0; i < clipsToExport.length; i++) {
+				const clip = clipsToExport[i];
+				const filter = filterChains[i];
+				report.push(`  ${clip.id}: ${basename(clip.video)}`);
+				report.push(`    Filter: ${filter}`);
+			}
+
+			report.push("");
+			report.push(`Output: ${outputPath}`);
+			report.push("Export finished successfully.");
+
+			return { content: [{ type: "text", text: report.join("\n") }], details: undefined };
+		},
+	});
+};

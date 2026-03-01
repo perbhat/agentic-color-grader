@@ -80,7 +80,7 @@ export async function detectSourceFormat(video: string): Promise<string> {
 
 		// Check color transfer characteristics
 		if (/color_transfer="?arib-std-b67"?/i.test(output)) return "hlg";
-		if (/color_transfer="?smpte2084"?/i.test(output)) return "hlg";
+		if (/color_transfer="?smpte2084"?/i.test(output)) return "pq";
 		if (/color_transfer="?bt709"?/i.test(output)) return "rec709";
 
 		// Check for Sony S-Log tags in metadata
@@ -118,8 +118,11 @@ export async function addClip(
 	options?: { group?: string; in_point?: string; out_point?: string; name?: string },
 ): Promise<TimelineClip> {
 	const absPath = resolve(video);
-	// Check if already in timeline
-	const existing = timeline.clips.find((c) => c.video === absPath);
+	// Check if already in timeline with the same in/out points (exact duplicate)
+	const inPt = options?.in_point ?? "00:00:00";
+	const existing = timeline.clips.find(
+		(c) => c.video === absPath && c.in_point === inPt && c.out_point === (options?.out_point ?? c.out_point),
+	);
 	if (existing) return existing;
 
 	const format = await detectSourceFormat(absPath);
