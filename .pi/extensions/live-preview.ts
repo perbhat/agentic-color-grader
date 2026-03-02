@@ -1,10 +1,9 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { existsSync } from "fs";
-import { readFile } from "fs/promises";
 import { resolve } from "path";
 import { spawn, execFile, type ChildProcess } from "child_process";
-import { buildFilterChain, resolveTimecode, type CorrectionParams } from "./lib/ffmpeg.ts";
+import { buildFilterChain, resolveTimecode, prepareImageForApi, type CorrectionParams } from "./lib/ffmpeg.ts";
 
 // ─── Module-level state ───────────────────────────────────────────────────
 
@@ -110,8 +109,8 @@ export default (pi: ExtensionAPI) => {
 
 				const content: any[] = [{ type: "text" as const, text: report }];
 				try {
-					const imgData = await readFile(framePath);
-					content.push({ type: "image" as const, data: imgData.toString("base64"), mimeType: "image/png" });
+					const img = await prepareImageForApi(framePath);
+					content.push({ type: "image" as const, data: img.data, mimeType: img.mimeType });
 				} catch {
 					content.push({ type: "text" as const, text: `\nFrame saved to: ${framePath}` });
 				}

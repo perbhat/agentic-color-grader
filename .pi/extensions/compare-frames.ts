@@ -1,9 +1,8 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { resolve, dirname } from "path";
-import { runFfmpeg, resolveTimecode } from "./lib/ffmpeg.ts";
+import { runFfmpeg, resolveTimecode, prepareImageForApi } from "./lib/ffmpeg.ts";
 
 const Parameters = Type.Object({
 	video: Type.String({ description: "Path to the video file." }),
@@ -85,8 +84,8 @@ export default (pi: ExtensionAPI) => {
 
 			const content: any[] = [{ type: "text" as const, text: report }];
 			try {
-				const imgData = await readFile(comparePath);
-				content.push({ type: "image" as const, data: imgData.toString("base64"), mimeType: "image/png" });
+				const img = await prepareImageForApi(comparePath);
+				content.push({ type: "image" as const, data: img.data, mimeType: img.mimeType });
 			} catch {
 				content.push({ type: "text" as const, text: `\nComparison saved to: ${comparePath}` });
 			}

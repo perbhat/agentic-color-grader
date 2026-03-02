@@ -1,6 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { resolve, dirname } from "path";
 import {
@@ -8,8 +7,11 @@ import {
 	extractSignalStats,
 	computeZoneDistribution,
 	diagnoseExposure,
+	deriveCorrectionFromStats,
 	resolveTimecode,
+	prepareImageForApi,
 } from "./lib/ffmpeg.ts";
+import { detectSourceFormat } from "./lib/timeline.ts";
 
 const Parameters = Type.Object({
 	video: Type.String({ description: "Path to the video file to analyze." }),
@@ -68,13 +70,18 @@ export default (pi: ExtensionAPI) => {
 			}
 
 			const zones = computeZoneDistribution(stats);
-			const diagnosis = diagnoseExposure(stats);
+			const sourceFormat = await detectSourceFormat(videoPath);
+			const diagnosis = diagnoseExposure(stats, sourceFormat);
+			const suggested = deriveCorrectionFromStats(stats);
+			const hasSuggestions = Object.keys(suggested).length > 0;
+			const isLog = /^(slog|log|hlg)/i.test(sourceFormat);
 
 			// Build text report
 			const report = [
 				"═══ FRAME ANALYSIS ═══",
 				`Video: ${videoPath}`,
 				`Timecode: ${tc}`,
+				`Source format: ${sourceFormat}`,
 				params.filter_chain ? `Filter chain: ${params.filter_chain}` : "Filter chain: (none — raw footage)",
 				"",
 				"── Luminance (Y) ──",
@@ -108,13 +115,27 @@ export default (pi: ExtensionAPI) => {
 				"",
 				"── Diagnosis ──",
 				diagnosis,
+				"",
+				...(hasSuggestions && !isLog ? [
+					"── Suggested Corrections (apply directly) ──",
+					`  ${JSON.stringify(suggested, null, 2).split("\n").join("\n  ")}`,
+					"",
+					"NOTE: These are auto-derived from signal stats. Apply via apply_correction",
+					"with these values merged into your existing corrections. Re-analyze after applying.",
+				] : isLog && !params.filter_chain ? [
+					"── Suggested Next Step ──",
+					`  This is ${sourceFormat} log footage. Apply LUT first before correcting:`,
+					`  apply_correction(video: "${videoPath}", corrections: { lut: "slog3-to-rec709" })`,
+					"  Then re-analyze the post-LUT result to get correction suggestions.",
+					"  Or use auto_correct_base to auto-grade from log to a neutral Rec.709 base.",
+				] : []),
 			].join("\n");
 
-			// Read frame image and return as ImageContent
+			// Read frame image and return as ImageContent (downscaled if needed to stay under API limit)
 			const content: any[] = [{ type: "text" as const, text: report }];
 			try {
-				const imgData = await readFile(framePath);
-				content.push({ type: "image" as const, data: imgData.toString("base64"), mimeType: "image/png" });
+				const img = await prepareImageForApi(framePath);
+				content.push({ type: "image" as const, data: img.data, mimeType: img.mimeType });
 			} catch {
 				content.push({ type: "text" as const, text: `\nFrame saved to: ${framePath} (could not read for inline display)` });
 			}

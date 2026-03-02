@@ -1,12 +1,12 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { resolve, dirname } from "path";
 import {
 	runFfmpeg,
 	buildFilterChain,
 	resolveTimecode,
+	prepareImageForApi,
 	type CorrectionParams,
 } from "./lib/ffmpeg.ts";
 
@@ -103,8 +103,8 @@ export default (pi: ExtensionAPI) => {
 
 			const content: any[] = [{ type: "text" as const, text: report }];
 			try {
-				const imgData = await readFile(previewPath);
-				content.push({ type: "image" as const, data: imgData.toString("base64"), mimeType: "image/png" });
+				const img = await prepareImageForApi(previewPath);
+				content.push({ type: "image" as const, data: img.data, mimeType: img.mimeType });
 			} catch {
 				content.push({ type: "text" as const, text: `\nPreview saved to: ${previewPath}` });
 			}

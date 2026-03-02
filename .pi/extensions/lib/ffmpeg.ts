@@ -272,11 +272,26 @@ export function computeZoneDistribution(stats: SignalStats): ZoneDistribution {
 
 // ─── Exposure diagnosis ────────────────────────────────────────────────────
 
-export function diagnoseExposure(stats: SignalStats): string {
+export interface SuggestedCorrections {
+	exposure?: number;
+	gamma?: number;
+	contrast?: number;
+	color_temperature?: number;
+	saturation?: number;
+	color_balance?: {
+		shadows?: ColorBalance;
+		midtones?: ColorBalance;
+		highlights?: ColorBalance;
+	};
+}
+
+export function diagnoseExposure(stats: SignalStats, sourceFormat?: string): string {
 	const lines: string[] = [];
+	const isLog = sourceFormat ? /^(slog|log|hlg)/i.test(sourceFormat) : false;
+	const logNote = " Expected for log/S-Log footage pre-LUT; will normalize after LUT application.";
 
 	if (stats.YAVG < 60) {
-		lines.push("⚠ UNDEREXPOSED: Average luminance is low (YAVG=" + stats.YAVG.toFixed(1) + "). Consider increasing exposure or gamma.");
+		lines.push("⚠ UNDEREXPOSED: Average luminance is low (YAVG=" + stats.YAVG.toFixed(1) + ")." + (isLog ? logNote : " Consider increasing exposure or gamma."));
 	} else if (stats.YAVG > 200) {
 		lines.push("⚠ OVEREXPOSED: Average luminance is high (YAVG=" + stats.YAVG.toFixed(1) + "). Consider decreasing exposure.");
 	} else {
@@ -284,7 +299,7 @@ export function diagnoseExposure(stats: SignalStats): string {
 	}
 
 	if (stats.YMIN > 30) {
-		lines.push("⚠ LIFTED BLACKS: Minimum Y=" + stats.YMIN.toFixed(0) + " — blacks are not reaching true black. Typical for S-Log footage pre-correction.");
+		lines.push("⚠ LIFTED BLACKS: Minimum Y=" + stats.YMIN.toFixed(0) + " — blacks are not reaching true black." + (isLog ? logNote : " Typical for S-Log footage pre-correction."));
 	} else if (stats.YMIN < 5) {
 		lines.push("⚠ CRUSHED BLACKS: Minimum Y=" + stats.YMIN.toFixed(0) + " — shadow detail may be lost.");
 	} else {
@@ -292,7 +307,7 @@ export function diagnoseExposure(stats: SignalStats): string {
 	}
 
 	if (stats.YMAX < 200) {
-		lines.push("⚠ LOW HIGHLIGHTS: Maximum Y=" + stats.YMAX.toFixed(0) + " — image doesn't use full brightness range.");
+		lines.push("⚠ LOW HIGHLIGHTS: Maximum Y=" + stats.YMAX.toFixed(0) + " — image doesn't use full brightness range." + (isLog ? logNote : ""));
 	} else if (stats.YMAX > 250) {
 		lines.push("⚠ CLIPPED HIGHLIGHTS: Maximum Y=" + stats.YMAX.toFixed(0) + " — highlight detail may be lost.");
 	} else {
@@ -313,7 +328,7 @@ export function diagnoseExposure(stats: SignalStats): string {
 	}
 
 	if (stats.SATAVG < 20) {
-		lines.push("⚠ LOW SATURATION: Average saturation=" + stats.SATAVG.toFixed(1) + ". Typical for log footage; will improve after LUT application.");
+		lines.push("⚠ LOW SATURATION: Average saturation=" + stats.SATAVG.toFixed(1) + "." + (isLog ? logNote : " Typical for log footage; will improve after LUT application."));
 	} else if (stats.SATAVG > 120) {
 		lines.push("⚠ HIGH SATURATION: Average saturation=" + stats.SATAVG.toFixed(1) + ". Consider reducing saturation.");
 	} else {
@@ -323,7 +338,115 @@ export function diagnoseExposure(stats: SignalStats): string {
 	return lines.join("\n");
 }
 
+/**
+ * Derive concrete correction values from signal stats to neutralize the image.
+ * Returns suggested parameters that can be directly applied via apply_correction.
+ * Designed for post-LUT footage (Rec.709 space) — do NOT use on raw log footage.
+ */
+export function deriveCorrectionFromStats(stats: SignalStats): SuggestedCorrections {
+	const corrections: SuggestedCorrections = {};
+
+	// ── Exposure: target YAVG ~110 (middle of 80-140 range) ──
+	if (stats.YAVG < 70) {
+		// Need to brighten — map how far off we are to stops
+		corrections.exposure = Math.min(1.5, (110 - stats.YAVG) / 80);
+	} else if (stats.YAVG > 160) {
+		corrections.exposure = Math.max(-1.5, (110 - stats.YAVG) / 80);
+	}
+
+	// ── Gamma: fine-tune midtones if YAVG is slightly off ──
+	if (stats.YAVG >= 70 && stats.YAVG < 90) {
+		corrections.gamma = 0.9 + (stats.YAVG - 70) * 0.005; // slight brightening
+	} else if (stats.YAVG > 140 && stats.YAVG <= 160) {
+		corrections.gamma = 1.0 + (stats.YAVG - 140) * 0.005; // slight darkening
+	}
+
+	// ── Contrast: if blacks are lifted post-LUT, add mild contrast ──
+	if (stats.YMIN > 20 && stats.YMAX < 240) {
+		corrections.contrast = 1.0 + Math.min(0.3, (stats.YMIN - 10) / 100);
+	}
+
+	// ── Color temperature: correct U-axis (blue/yellow) cast ──
+	const uOffset = stats.UAVG - 128;
+	if (Math.abs(uOffset) > 3) {
+		// U > 128 = blue cast → lower temp (warmer), U < 128 = yellow cast → higher temp (cooler)
+		// Scale: each unit of U offset ≈ 60K correction
+		corrections.color_temperature = 6500 - (uOffset * 60);
+		// Clamp to reasonable range
+		corrections.color_temperature = Math.max(3000, Math.min(10000, corrections.color_temperature));
+	}
+
+	// ── Color balance: correct V-axis (red-green/magenta-cyan) tint ──
+	const vOffset = stats.VAVG - 128;
+	if (Math.abs(vOffset) > 3) {
+		// V > 128 = red/magenta shift → reduce red, add green
+		// V < 128 = green/cyan shift → add red, reduce green
+		const shift = -(vOffset / 128) * 0.5; // map to -0.5 .. 0.5 range
+		corrections.color_balance = {
+			midtones: {
+				r: parseFloat(shift.toFixed(3)),
+				g: parseFloat((-shift * 0.5).toFixed(3)),
+				b: parseFloat((-shift * 0.25).toFixed(3)),
+			},
+		};
+	}
+
+	// ── Saturation: target SATAVG ~55 (middle of 40-80 range) ──
+	if (stats.SATAVG < 30) {
+		corrections.saturation = Math.min(1.6, 55 / Math.max(stats.SATAVG, 5));
+	} else if (stats.SATAVG > 90) {
+		corrections.saturation = Math.max(0.5, 55 / stats.SATAVG);
+	}
+
+	return corrections;
+}
+
 // ─── Timecode helpers ──────────────────────────────────────────────────────
+
+/**
+ * Probe the embedded start time of a video file.
+ * Camera files (e.g. Sony) often embed a continuous timecode (e.g. 00:25:33)
+ * which FCPXML references as the `start` attribute. FFmpeg's `-ss` flag seeks
+ * relative to the file start (0), not the embedded timecode, so we need to
+ * know the offset to convert FCPXML timecodes to file-relative positions.
+ *
+ * Returns the start_time in seconds, or 0 if not found/not applicable.
+ */
+export async function probeStartTime(video: string): Promise<number> {
+	try {
+		const { stdout } = await runFfprobe([
+			"-v", "quiet",
+			"-show_entries", "format=start_time",
+			"-print_format", "flat",
+			"-i", video,
+		]);
+		const match = stdout.match(/start_time="?([\d.]+)"?/);
+		if (match) {
+			return parseFloat(match[1]);
+		}
+	} catch {
+		// fall through
+	}
+
+	// Fallback: check video stream start_time
+	try {
+		const { stdout } = await runFfprobe([
+			"-v", "quiet",
+			"-select_streams", "v:0",
+			"-show_entries", "stream=start_time",
+			"-print_format", "flat",
+			"-i", video,
+		]);
+		const match = stdout.match(/start_time="?([\d.]+)"?/);
+		if (match) {
+			return parseFloat(match[1]);
+		}
+	} catch {
+		// fall through
+	}
+
+	return 0;
+}
 
 export function resolveTimecode(tc: string): string {
 	if (/^\d+(\.\d+)?$/.test(tc)) {
@@ -336,4 +459,56 @@ export function resolveTimecode(tc: string): string {
 		return "00:" + tc;
 	}
 	throw new Error(`Invalid timecode format: "${tc}". Use HH:MM:SS, MM:SS, or seconds.`);
+}
+
+// ─── Image preparation for API ────────────────────────────────────────────
+
+const API_IMAGE_MAX_BYTES = 3.5 * 1024 * 1024; // 3.5MB — conservative limit to stay safely under 5MB API cap
+
+/**
+ * Read a PNG frame from disk and prepare it for the API.
+ * If the file exceeds the size limit, re-encodes as a smaller PNG (never JPEG).
+ * PNG is lossless and preserves chroma precision needed for tint/color cast detection.
+ * Returns { data: base64string, mimeType: string }.
+ */
+export async function prepareImageForApi(
+	pngPath: string,
+): Promise<{ data: string; mimeType: string }> {
+	const { readFile, stat } = await import("fs/promises");
+
+	const info = await stat(pngPath);
+
+	if (info.size <= API_IMAGE_MAX_BYTES) {
+		const imgData = await readFile(pngPath);
+		return { data: imgData.toString("base64"), mimeType: "image/png" };
+	}
+
+	// Re-encode as downscaled PNG — NEVER use JPEG for color grading previews.
+	// JPEG compression smears subtle chroma shifts (UV ±5 from 128) making
+	// tint detection unreliable. PNG stays lossless even when resized.
+	const scaledPath = pngPath.replace(/\.png$/, "-api.png");
+
+	// Try progressively smaller sizes until we fit
+	for (const maxWidth of [1920, 1440, 1280, 960]) {
+		await runFfmpeg([
+			"-i", pngPath,
+			"-vf", `scale='min(${maxWidth},iw)':-2`,
+			scaledPath,
+		]);
+
+		const scaledInfo = await stat(scaledPath);
+		if (scaledInfo.size <= API_IMAGE_MAX_BYTES) {
+			const scaledData = await readFile(scaledPath);
+			return { data: scaledData.toString("base64"), mimeType: "image/png" };
+		}
+	}
+
+	// Last resort: smallest size, still PNG
+	await runFfmpeg([
+		"-i", pngPath,
+		"-vf", "scale='min(800,iw)':-2",
+		scaledPath,
+	]);
+	const scaledData = await readFile(scaledPath);
+	return { data: scaledData.toString("base64"), mimeType: "image/png" };
 }

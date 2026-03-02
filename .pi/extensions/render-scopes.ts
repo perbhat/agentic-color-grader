@@ -1,9 +1,8 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { resolve, dirname } from "path";
-import { runFfmpeg, resolveTimecode } from "./lib/ffmpeg.ts";
+import { runFfmpeg, resolveTimecode, prepareImageForApi } from "./lib/ffmpeg.ts";
 
 type ScopeType = "waveform" | "parade" | "vectorscope" | "histogram";
 
@@ -57,11 +56,8 @@ export default (pi: ExtensionAPI) => {
 				}
 
 				let vf: string;
-				if (params.filter_chain) {
-					vf = `${params.filter_chain},${scopeFilter}`;
-				} else {
-					vf = scopeFilter;
-				}
+				const base = params.filter_chain ? `${params.filter_chain},format=yuv444p` : "format=yuv444p";
+				vf = `${base},${scopeFilter}`;
 
 				const outPath = resolve(outDir, `scope-${scope}.png`);
 				const args = [
@@ -77,11 +73,11 @@ export default (pi: ExtensionAPI) => {
 					await runFfmpeg(args);
 					results.push(`${scope}: ${outPath}`);
 
-					// Read and include scope image
+					// Read and include scope image (downscaled if needed)
 					try {
-						const imgData = await readFile(outPath);
+						const img = await prepareImageForApi(outPath);
 						content.push({ type: "text" as const, text: `\n── ${scope} scope ──` });
-						content.push({ type: "image" as const, data: imgData.toString("base64"), mimeType: "image/png" });
+						content.push({ type: "image" as const, data: img.data, mimeType: img.mimeType });
 					} catch {
 						// File saved but couldn't read for inline
 					}

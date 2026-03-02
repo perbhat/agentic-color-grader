@@ -31,7 +31,26 @@ Trigger this workflow when the user asks to:
 | VAVG   | ~128          | ~128           | Neutral = 128 |
 | SATAVG | 40-80         | 40-80          | Moderate saturation |
 
-## Step-by-Step Workflow
+## Quick Start: Auto Correct Base
+
+For a fast initial grade, use `auto_correct_base` which does the full analyze→LUT→correct loop automatically:
+
+```
+auto_correct_base(video: "input.mp4")
+```
+
+This will:
+1. Detect the source format (S-Log3, S-Log2, HLG, etc.)
+2. Apply the appropriate LUT
+3. Analyze post-LUT stats
+4. Auto-derive exposure, white balance, contrast, and saturation corrections
+5. Return a preview with the complete filter chain
+
+From there, fine-tune visually using `apply_correction` with the returned parameters as a base.
+
+## Manual Step-by-Step Workflow
+
+Use this when you want full control over each step, or when auto_correct_base needs refinement.
 
 ### Step 1: Analyze Raw Footage
 

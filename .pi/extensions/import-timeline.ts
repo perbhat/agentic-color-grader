@@ -13,6 +13,7 @@ import {
 	addClip,
 	formatTimelineSummary,
 } from "./lib/timeline.ts";
+import { probeStartTime } from "./lib/ffmpeg.ts";
 
 const Parameters = Type.Object({
 	fcpxml_path: Type.String({ description: "Path to the .fcpxml file to import." }),
@@ -67,6 +68,9 @@ export default (pi: ExtensionAPI) => {
 			let addedCount = 0;
 			let skippedCount = 0;
 
+			// Cache probed start times per source file to avoid redundant ffprobe calls
+			const startTimeCache = new Map<string, number>();
+
 			for (const clipRef of parsed.clips) {
 				const asset = parsed.assets.get(clipRef.assetId);
 				if (!asset) {
@@ -80,8 +84,24 @@ export default (pi: ExtensionAPI) => {
 					report.push(`  WARN: Source file missing: ${asset.src}`);
 				}
 
-				const inPoint = secondsToTimecode(clipRef.start);
-				const outPoint = secondsToTimecode(clipRef.start + clipRef.duration);
+				// Probe embedded start time to convert FCPXML timecodes to file-relative positions.
+				// Camera files (e.g. Sony) embed a continuous timecode (e.g. 25:33) which FCPXML
+				// references as the `start` attribute. FFmpeg's -ss seeks from file start (0),
+				// so we subtract the embedded start_time to get the correct file-relative position.
+				let embedStart = 0;
+				if (existsSync(asset.src)) {
+					if (startTimeCache.has(asset.src)) {
+						embedStart = startTimeCache.get(asset.src)!;
+					} else {
+						embedStart = await probeStartTime(asset.src);
+						startTimeCache.set(asset.src, embedStart);
+					}
+				}
+
+				const fileRelativeIn = Math.max(0, clipRef.start - embedStart);
+				const fileRelativeOut = Math.max(0, clipRef.start + clipRef.duration - embedStart);
+				const inPoint = secondsToTimecode(fileRelativeIn);
+				const outPoint = secondsToTimecode(fileRelativeOut);
 				const clipName = clipRef.name || basename(asset.src);
 
 				const clip = await addClip(timeline, asset.src, {
@@ -90,7 +110,11 @@ export default (pi: ExtensionAPI) => {
 					name: clipName,
 				});
 
-				report.push(`  ${clip.id}: ${clipName} (${inPoint} → ${outPoint})`);
+				if (embedStart > 0) {
+					report.push(`  ${clip.id}: ${clipName} (${inPoint} → ${outPoint}) [embedded TC offset: ${secondsToTimecode(embedStart)}]`);
+				} else {
+					report.push(`  ${clip.id}: ${clipName} (${inPoint} → ${outPoint})`);
+				}
 				addedCount++;
 			}
 
